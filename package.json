@@ -1,0 +1,23 @@
+{
+  "name": "ethos-sow-renderer",
+  "version": "1.0.0",
+  "description": "Pixel-perfect SOW renderer using docxtemplater",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "docxtemplater": "^3.46.0",
+    "pizzip": "^3.1.6",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
