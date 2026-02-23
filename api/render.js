@@ -19,6 +19,136 @@ try {
   console.error('❌ Template load error:', err.message);
 }
 
+/**
+ * Fix Word's habit of splitting placeholder tags across XML runs
+ * e.g., <w:t>{{CLIE</w:t></w:r><w:r><w:t>NT_NAME}}</w:t> -> <w:t>{{CLIENT_NAME}}</w:t>
+ */
+function fixSplitTags(zip) {
+  const xmlFiles = ['word/document.xml', 'word/header1.xml', 'word/header2.xml', 'word/footer1.xml', 'word/footer2.xml'];
+  
+  for (const filename of xmlFiles) {
+    try {
+      let content = zip.file(filename)?.asText();
+      if (!content) continue;
+      
+      // Pattern: find text runs and merge consecutive ones that contain partial placeholders
+      // This regex finds <w:t> tags and their content
+      let modified = true;
+      let iterations = 0;
+      const maxIterations = 50; // Safety limit
+      
+      while (modified && iterations < maxIterations) {
+        modified = false;
+        iterations++;
+        
+        // Find cases where {{ or }} or {# or {/ are split across runs
+        // Match: </w:t></w:r><w:r><w:t> or </w:t></w:r><w:r ...><w:t> patterns
+        const splitPattern = /<\/w:t>(<\/w:r>)(<w:r[^>]*>)(<w:rPr>.*?<\/w:rPr>)?(<w:t[^>]*>)/gs;
+        
+        // Check if we have any partial placeholder tags that span runs
+        const partialOpenPattern = /\{\{[^}]*<\/w:t>/;
+        const partialClosePattern = /<w:t[^>]*>[^{]*\}\}/;
+        const partialLoopOpenPattern = /\{[#/][^}]*<\/w:t>/;
+        
+        if (partialOpenPattern.test(content) || partialLoopOpenPattern.test(content)) {
+          // Merge adjacent text runs
+          const newContent = content.replace(splitPattern, (match, closeR, openR, rPr, openT) => {
+            modified = true;
+            return ''; // Remove the run boundary, merging text content
+          });
+          
+          if (newContent !== content) {
+            content = newContent;
+          } else {
+            modified = false;
+          }
+        }
+      }
+      
+      // Alternative approach: Use a more aggressive merge for placeholder patterns
+      // Find all {{ ... }} patterns that might be split and reconstruct them
+      content = mergeTemplateTags(content);
+      
+      zip.file(filename, content);
+    } catch (e) {
+      // File might not exist, skip
+    }
+  }
+  
+  return zip;
+}
+
+/**
+ * More aggressive tag merging - extracts all text, finds placeholders, rebuilds
+ */
+function mergeTemplateTags(xml) {
+  // Find sequences of <w:t> tags within the same paragraph that form a placeholder
+  // This handles the case where Word splits {{CLIENT_NAME}} into multiple runs
+  
+  // Pattern to match a paragraph or run containing partial placeholder syntax
+  const runPattern = /(<w:r[^>]*>)(.*?)(<\/w:r>)/gs;
+  
+  // First pass: identify paragraphs with split placeholders
+  const paragraphPattern = /(<w:p[^>]*>)(.*?)(<\/w:p>)/gs;
+  
+  return xml.replace(paragraphPattern, (match, pOpen, pContent, pClose) => {
+    // Extract all text content from this paragraph
+    const textParts = [];
+    const textPattern = /<w:t[^>]*>([^<]*)<\/w:t>/g;
+    let textMatch;
+    
+    while ((textMatch = textPattern.exec(pContent)) !== null) {
+      textParts.push(textMatch[1]);
+    }
+    
+    const fullText = textParts.join('');
+    
+    // Check if this paragraph has placeholder patterns
+    if (!/\{\{|\}\}|\{#|\{\//.test(fullText)) {
+      return match; // No placeholders, return unchanged
+    }
+    
+    // Check if placeholders are complete (not split)
+    const hasOpenBrace = fullText.includes('{{') || fullText.includes('{#') || fullText.includes('{/');
+    const hasCloseBrace = fullText.includes('}}');
+    
+    if (!hasOpenBrace || !hasCloseBrace) {
+      return match; // Incomplete, might span paragraphs - leave alone
+    }
+    
+    // Rebuild paragraph with merged text runs for placeholders
+    // This is a simplified approach - merge all <w:t> content into fewer runs
+    let newContent = pContent;
+    
+    // Remove formatting splits within placeholder patterns
+    // Match: }}anything{{ and merge the runs between
+    const mergePattern = /(<w:t[^>]*>)([^<]*\{\{[A-Z_#/.]+)(<\/w:t><\/w:r><w:r[^>]*>(?:<w:rPr>.*?<\/w:rPr>)?<w:t[^>]*>)([^<]*\}\})/g;
+    
+    newContent = newContent.replace(mergePattern, '$1$2$4');
+    
+    // More aggressive: merge any adjacent runs where one ends mid-placeholder
+    // Pattern: ends with {{ or {# or {/ but no }}
+    let prevContent = '';
+    while (newContent !== prevContent) {
+      prevContent = newContent;
+      
+      // Merge runs where text ends with partial opening tag
+      newContent = newContent.replace(
+        /(<w:t[^>]*>)([^<]*(?:\{\{|\{#|\{\/)[A-Z_]*?)(<\/w:t><\/w:r><w:r[^>]*>(?:<w:rPr>.*?<\/w:rPr>)?<w:t[^>]*>)([A-Z_]*\}\}[^<]*)/gi,
+        '$1$2$4'
+      );
+      
+      // Merge runs where text is middle of placeholder (only uppercase, underscore, dot)
+      newContent = newContent.replace(
+        /(<w:t[^>]*>)([^<]*(?:\{\{|\{#|\{\/)[A-Z_.]*?)(<\/w:t><\/w:r><w:r[^>]*>(?:<w:rPr>.*?<\/w:rPr>)?<w:t[^>]*>)([A-Z_.]*[^<]*)/gi,
+        '$1$2$4'
+      );
+    }
+    
+    return pOpen + newContent + pClose;
+  });
+}
+
 function formatNumber(num) {
   if (num === null || num === undefined) return '';
   return Math.round(num).toLocaleString('en-US');
@@ -162,12 +292,16 @@ module.exports = async (req, res) => {
     // Transform content to template placeholders
     const data = transformContent(content);
     
-    // Load and render template
-    const zip = new PizZip(templateContent);
+    // Load template and fix split placeholder tags
+    let zip = new PizZip(templateContent);
+    zip = fixSplitTags(zip);
+    
+    // Render with docxtemplater
     const doc = new Docxtemplater(zip, {
       paragraphLoop: true,
       linebreaks: true,
       nullGetter: () => '', // Return empty string for undefined values
+      delimiters: { start: '{{', end: '}}' },
     });
     
     doc.render(data);
