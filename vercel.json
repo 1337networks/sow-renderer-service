@@ -1,21 +1,5 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/render.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/render",
-      "dest": "/api/render.js"
-    },
-    {
-      "src": "/health",
-      "dest": "/api/render.js"
-    }
-  ],
   "functions": {
     "api/render.js": {
       "memory": 1024,
